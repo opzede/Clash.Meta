@@ -191,7 +191,6 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 
 	resolver.DefaultResolver = r
 	resolver.DefaultHostMapper = m
-	resolver.DefaultLocalServer = dns.NewLocalServer(r, m)
 
 	if pr.HasProxyServer() {
 		resolver.ProxyServerHostResolver = pr
@@ -352,7 +351,6 @@ func updateGeneral(general *config.General, force bool) {
 	listener.ReCreateHTTP(general.Port, tcpIn)
 	listener.ReCreateSocks(general.SocksPort, tcpIn, udpIn)
 	listener.ReCreateRedir(general.RedirPort, tcpIn, udpIn)
-	listener.ReCreateAutoRedir(general.EBpf.AutoRedir, tcpIn, udpIn)
 	listener.ReCreateTProxy(general.TProxyPort, tcpIn, udpIn)
 	listener.ReCreateMixed(general.MixedPort, tcpIn, udpIn)
 	listener.ReCreateShadowSocks(general.ShadowSocksConfig, tcpIn, udpIn)
