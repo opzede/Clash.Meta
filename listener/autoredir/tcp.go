@@ -3,7 +3,8 @@ package autoredir
 import (
 	"net"
 	"net/netip"
-
+	"time"
+	
 	"github.com/Dreamacro/clash/adapter/inbound"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/log"
@@ -56,6 +57,7 @@ func (l *Listener) handleRedir(conn net.Conn, in chan<- C.ConnContext) {
 	}
 
 	_ = conn.(*net.TCPConn).SetKeepAlive(true)
+	_ = conn.(*net.TCPConn).SetKeepAlivePeriod(3600 * time.Second)
 
 	in <- inbound.NewSocket(target, conn, C.REDIR, l.additions...)
 }
