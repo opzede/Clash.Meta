@@ -2,7 +2,7 @@ package tproxy
 
 import (
 	"net"
-
+	"time"
 	"github.com/Dreamacro/clash/adapter/inbound"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/transport/socks5"
@@ -33,6 +33,7 @@ func (l *Listener) Close() error {
 func (l *Listener) handleTProxy(conn net.Conn, in chan<- C.ConnContext, additions ...inbound.Addition) {
 	target := socks5.ParseAddrToSocksAddr(conn.LocalAddr())
 	conn.(*net.TCPConn).SetKeepAlive(true)
+	conn.(*net.TCPConn).SetKeepAlivePeriod(3600 * time.Second)
 	in <- inbound.NewSocket(target, conn, C.TPROXY, additions...)
 }
 
