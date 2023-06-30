@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -220,16 +219,18 @@ type RawTun struct {
 }
 
 type RawTuicServer struct {
-	Enable                bool     `yaml:"enable" json:"enable"`
-	Listen                string   `yaml:"listen" json:"listen"`
-	Token                 []string `yaml:"token" json:"token"`
-	Certificate           string   `yaml:"certificate" json:"certificate"`
-	PrivateKey            string   `yaml:"private-key" json:"private-key"`
-	CongestionController  string   `yaml:"congestion-controller" json:"congestion-controller,omitempty"`
-	MaxIdleTime           int      `yaml:"max-idle-time" json:"max-idle-time,omitempty"`
-	AuthenticationTimeout int      `yaml:"authentication-timeout" json:"authentication-timeout,omitempty"`
-	ALPN                  []string `yaml:"alpn" json:"alpn,omitempty"`
-	MaxUdpRelayPacketSize int      `yaml:"max-udp-relay-packet-size" json:"max-udp-relay-packet-size,omitempty"`
+	Enable                bool              `yaml:"enable" json:"enable"`
+	Listen                string            `yaml:"listen" json:"listen"`
+	Token                 []string          `yaml:"token" json:"token"`
+	Users                 map[string]string `yaml:"users" json:"users,omitempty"`
+	Certificate           string            `yaml:"certificate" json:"certificate"`
+	PrivateKey            string            `yaml:"private-key" json:"private-key"`
+	CongestionController  string            `yaml:"congestion-controller" json:"congestion-controller,omitempty"`
+	MaxIdleTime           int               `yaml:"max-idle-time" json:"max-idle-time,omitempty"`
+	AuthenticationTimeout int               `yaml:"authentication-timeout" json:"authentication-timeout,omitempty"`
+	ALPN                  []string          `yaml:"alpn" json:"alpn,omitempty"`
+	MaxUdpRelayPacketSize int               `yaml:"max-udp-relay-packet-size" json:"max-udp-relay-packet-size,omitempty"`
+	CWND                  int               `yaml:"cwnd" json:"cwnd,omitempty"`
 }
 
 type RawConfig struct {
@@ -356,6 +357,7 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 		TuicServer: RawTuicServer{
 			Enable:                false,
 			Token:                 nil,
+			Users:                 nil,
 			Certificate:           "",
 			PrivateKey:            "",
 			Listen:                "",
@@ -417,9 +419,9 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 			StoreSelected: true,
 		},
 		GeoXUrl: RawGeoXUrl{
-			Mmdb:    "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
-			GeoIp:   "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat",
-			GeoSite: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+			Mmdb:    "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
+			GeoIp:   "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat",
+			GeoSite: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
 		},
 	}
 
@@ -655,7 +657,7 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 		}
 		ps = append(ps, proxies[v])
 	}
-	hc := provider.NewHealthCheck(ps, "", 0, true)
+	hc := provider.NewHealthCheck(ps, "", 0, true, nil)
 	pd, _ := provider.NewCompatibleProvider(provider.ReservedName, ps, hc)
 	providersMap[provider.ReservedName] = pd
 
@@ -841,7 +843,7 @@ func parseHosts(cfg *RawConfig) (*trie.DomainTrie[resolver.HostValue], error) {
 				} else {
 					ips := make([]netip.Addr, 0)
 					for _, addr := range addrs {
-						if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback()&&!ipnet.IP.IsLinkLocalUnicast() {
+						if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && !ipnet.IP.IsLinkLocalUnicast() {
 							if ip, err := netip.ParseAddr(ipnet.IP.String()); err == nil {
 								ips = append(ips, ip)
 							}
@@ -914,7 +916,7 @@ func parseNameServer(servers []string, preferH3 bool) ([]dns.NameServer, error) 
 			addr, err = hostWithDefaultPort(u.Host, "443")
 			if err == nil {
 				proxyName = ""
-				clearURL := url.URL{Scheme: "https", Host: addr, Path: u.Path}
+				clearURL := url.URL{Scheme: "https", Host: addr, Path: u.Path, User: u.User}
 				addr = clearURL.String()
 				dnsNetType = "https" // DNS over HTTPS
 				if len(u.Fragment) != 0 {
@@ -938,6 +940,21 @@ func parseNameServer(servers []string, preferH3 bool) ([]dns.NameServer, error) 
 		case "quic":
 			addr, err = hostWithDefaultPort(u.Host, "853")
 			dnsNetType = "quic" // DNS over QUIC
+		case "system":
+			dnsNetType = "system" // System DNS
+		case "rcode":
+			dnsNetType = "rcode"
+			addr = u.Host
+			switch addr {
+			case "success",
+				"format_error",
+				"server_failure",
+				"name_error",
+				"not_implemented",
+				"refused":
+			default:
+				err = fmt.Errorf("unsupported RCode type: %s", addr)
+			}
 		default:
 			return nil, fmt.Errorf("DNS NameServer[%d] unsupport scheme: %s", idx, u.Scheme)
 		}
@@ -970,6 +987,10 @@ func init() {
 func parsePureDNSServer(server string) string {
 	addPre := func(server string) string {
 		return "udp://" + server
+	}
+
+	if server == "system" {
+		return "system://"
 	}
 
 	if ip, err := netip.ParseAddr(server); err != nil {
@@ -1142,6 +1163,9 @@ func parseDNS(rawCfg *RawConfig, hosts *trie.DomainTrie[resolver.HostValue], rul
 	}
 	// check default nameserver is pure ip addr
 	for _, ns := range dnsCfg.DefaultNameserver {
+		if ns.Net == "system" {
+			continue
+		}
 		host, _, err := net.SplitHostPort(ns.Addr)
 		if err != nil || net.ParseIP(host) == nil {
 			u, err := url.Parse(ns.Addr)
@@ -1273,6 +1297,7 @@ func parseTuicServer(rawTuic RawTuicServer, general *General) error {
 		Enable:                rawTuic.Enable,
 		Listen:                rawTuic.Listen,
 		Token:                 rawTuic.Token,
+		Users:                 rawTuic.Users,
 		Certificate:           rawTuic.Certificate,
 		PrivateKey:            rawTuic.PrivateKey,
 		CongestionController:  rawTuic.CongestionController,
@@ -1280,6 +1305,7 @@ func parseTuicServer(rawTuic RawTuicServer, general *General) error {
 		AuthenticationTimeout: rawTuic.AuthenticationTimeout,
 		ALPN:                  rawTuic.ALPN,
 		MaxUdpRelayPacketSize: rawTuic.MaxUdpRelayPacketSize,
+		CWND:                  rawTuic.CWND,
 	}
 	return nil
 }
@@ -1295,7 +1321,7 @@ func parseSniffer(snifferRaw RawSniffer) (*Sniffer, error) {
 	if len(snifferRaw.Sniff) != 0 {
 		for sniffType, sniffConfig := range snifferRaw.Sniff {
 			find := false
-			ports, err := parsePortRange(sniffConfig.Ports)
+			ports, err := utils.NewIntRangesFromList[uint16](sniffConfig.Ports)
 			if err != nil {
 				return nil, err
 			}
@@ -1322,7 +1348,7 @@ func parseSniffer(snifferRaw RawSniffer) (*Sniffer, error) {
 			// Deprecated: Use Sniff instead
 			log.Warnln("Deprecated: Use Sniff instead")
 		}
-		globalPorts, err := parsePortRange(snifferRaw.Ports)
+		globalPorts, err := utils.NewIntRangesFromList[uint16](snifferRaw.Ports)
 		if err != nil {
 			return nil, err
 		}
@@ -1366,29 +1392,4 @@ func parseSniffer(snifferRaw RawSniffer) (*Sniffer, error) {
 	sniffer.SkipDomain = skipDomainTrie.NewDomainSet()
 
 	return sniffer, nil
-}
-
-func parsePortRange(portRanges []string) ([]utils.Range[uint16], error) {
-	ports := make([]utils.Range[uint16], 0)
-	for _, portRange := range portRanges {
-		portRaws := strings.Split(portRange, "-")
-		p, err := strconv.ParseUint(portRaws[0], 10, 16)
-		if err != nil {
-			return nil, fmt.Errorf("%s format error", portRange)
-		}
-
-		start := uint16(p)
-		if len(portRaws) > 1 {
-			p, err = strconv.ParseUint(portRaws[1], 10, 16)
-			if err != nil {
-				return nil, fmt.Errorf("%s format error", portRange)
-			}
-
-			end := uint16(p)
-			ports = append(ports, *utils.NewRange(start, end))
-		} else {
-			ports = append(ports, *utils.NewRange(start, start))
-		}
-	}
-	return ports, nil
 }
